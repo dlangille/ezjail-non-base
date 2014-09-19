@@ -9,8 +9,9 @@ Tested once.  It worked.  Do not use this in production.  Test carefully.
 
 Here is what I did to get a simple jail running:
 
+<pre>
 ezjail-admin install -d newjailwithoutbase
 ezjail-admin create -n newjailwithoutbase testing "em0|10.0.0.114"
 ezjail-admin start testing
 ezjail-admin console testing
-
+</pre>
