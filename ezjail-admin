@@ -24,7 +24,10 @@ ezjail_snap_date_format="%Y%m%d%H%M"
 : ${ezjail_sourcetree="/usr/src"}
 : ${ezjail_uglyperlhack="YES"}
 : ${ezjail_default_execute="/usr/bin/login -f root"}
+: ${ezjail_newjailsrc="newjail"}
 
+# XXX mount_enable is used by /etc/rc.d/jail
+# XXX setting this to false in /usr/local/etc/ezjail/FOO will stop mounts from occuring for that jail
 : ${ezjail_mount_enable="YES"}
 : ${ezjail_devfs_enable="YES"}
 : ${ezjail_devfs_ruleset="devfsrules_jail"}
@@ -266,6 +269,19 @@ fetchjailinfo () {
   jls | grep -q -E "^ *${ezjail_id} " || unset ezjail_id
 }
 
+# we are don't a basejail here, but copying the full system into a non-basejail
+ezjail_cp_full_to_newjail() {
+  # Fill basejail from installed world
+#  cd "${ezjail_jailfull}" || exerr "Error: Cant access temporary full world directory."
+
+  [ "${ezjail_use_zfs}" = "YES" ] || exerr "Error: ezjail_cp_full_to_newjail is for ZFS based systems only."
+
+  ensure_jailzfs
+
+  # XXX nonbasejail should be a configuration item
+  /sbin/zfs rename ${ezjail_jailzfs}/fulljail ${ezjail_jailzfs}/newjailwithoutbase
+}
+
 # fill the base jail - this function is used by install and update
 ezjail_splitworld() {
   # Fill basejail from installed world
@@ -292,9 +308,9 @@ ezjail_splitworld() {
 
   # Try to remove the old template jail
   if [ "${ezjail_use_zfs}" = "YES" ]; then
-    [ -d "${ezjail_jailtemplate}" ] && zfs destroy -R ${ezjail_jailzfs}/newjail && rm -rf "${ezjail_jailtemplate}"
+    [ -d "${ezjail_jailtemplate}" ] && /sbin/zfs destroy -R ${ezjail_jailzfs}/newjail && rm -rf "${ezjail_jailtemplate}"
     cd ${ezjail_jaildir}
-    zfs rename ${ezjail_jailzfs}/fulljail ${ezjail_jailzfs}/newjail
+    /sbin/zfs rename ${ezjail_jailzfs}/fulljail ${ezjail_jailzfs}/newjail
   else
     [ -d "${ezjail_jailtemplate}" ] && chflags -R noschg "${ezjail_jailtemplate}" && rm -rf "${ezjail_jailtemplate}"
     mv "${ezjail_jailfull}" "${ezjail_jailtemplate}"
@@ -534,7 +550,9 @@ case "$1" in
 create)
   # Clean variables, prevent pollution
   unset ezjail_rootdir ezjail_flavours ezjail_softlink ezjail_image ezjail_imagetype ezjail_imageparams ezjail_imagesize ezjail_parentzfs ezjail_device ezjail_devicelink ezjail_config ezjail_attachparams ezjail_exists ezjail_attachblocking ezjail_forceblocking ezjail_sourcedevice ezjail_rootdirempty ezjail_fromarchive ezjail_fromarchive_config
-  shift; while getopts :f:r:s:xbic:C:a:A:z: arg; do case ${arg} in
+  
+  ezjail_newjailsrc=newjail=${ezjail_jailtemplate}
+  shift; while getopts :f:r:n:s:xbic:C:a:A:z: arg; do case ${arg} in
     x) ezjail_exists="YES";;
     r) ezjail_rootdir=${OPTARG};;
     f) ezjail_flavours=${OPTARG};;
@@ -543,6 +561,7 @@ create)
     c) ezjail_imagetype=${OPTARG};;
     C) ezjail_imageparams=${OPTARG};;
     b) ezjail_forceblocking="YES";;
+    n) ezjail_newjailsrc=${OPTARG};;
     i) : ${ezjail_imagetype="simple"};;
     s) ezjail_imagesize=${OPTARG};;
     z) ezjail_imagetype="zfs";
@@ -578,9 +597,18 @@ create)
     ezjail_imagerestbytes=`echo ${_val} % 1048576 | bc`
   fi
 
+  # ezjail_newjailsrc is only compatible with zfs
+  if [ ${ezjail_newjailsrc} ]; then
+    [ "${ezjail_use_zfs}" = "YES" ] || exerr "Error: you can specify a newjailsrc only on zfs based systems"
+  fi
+  
+  # check if our ezjail_newjailsrc exists, if specified
+  # this is typically a non-basejail
+  [ -d "${ezjail_jaildir}/${ezjail_newjailsrc}" ] || exerr "Error: newjailsrc does not exist. '${ezjail_newjailsrc}'\n."
+
   # check, whether ezjail has been set up correctly. existence of
   # ezjail_jailbase is our indicator
-  [ -d "${ezjail_jailbase}" ] || exerr "Error: base jail does not exist.\n  Please run '${ezjail_admin} install' or '${ezjail_admin} update' first."
+  [ ${ezjail_jailzfs}/${ezjail_newjailsrc} -a -d "${ezjail_jaildir}/${ezjail_newjailsrc}" ] || exerr "Error: newjail does not exist.\n  Please run '${ezjail_admin} install' or '${ezjail_admin} update' first."
 
   # relative paths don't make sense in rc.scripts
   [ "${ezjail_jaildir%%[!/]*}" ] || exerr "Error: Need an absolute path in ezjail_jaildir.\n  It is currently set to: ${ezjail_jaildir}."
@@ -744,10 +772,11 @@ create)
     # now take a copy of our template jail
     if [ "${ezjail_imagetype}" = "zfs" -a "${ezjail_use_zfs}" = "YES" ]; then
       # create ZFS filesystem first when using ZFS
-      /sbin/zfs snapshot ${ezjail_jailzfs}/newjail@_createnewjailtmp
-      /sbin/zfs send ${ezjail_jailzfs}/newjail@_createnewjailtmp | zfs receive -F ${ezjail_parentzfs}/${ezjail_hostname}
+      # XXX I think this is where we can make use of a non-basejail
+      /sbin/zfs snapshot ${ezjail_jailzfs}/${ezjail_newjailsrc}@_createnewjailtmp
+      /sbin/zfs send ${ezjail_jailzfs}/${ezjail_newjailsrc}@_createnewjailtmp | /sbin/zfs receive -F ${ezjail_parentzfs}/${ezjail_hostname}
       /sbin/zfs destroy ${ezjail_parentzfs}/${ezjail_hostname}@_createnewjailtmp
-      /sbin/zfs destroy ${ezjail_jailzfs}/newjail@_createnewjailtmp
+      /sbin/zfs destroy ${ezjail_jailzfs}/${ezjail_newjailsrc}@_createnewjailtmp
     else
       mkdir -p "${ezjail_rootdir}" && cd "${ezjail_jailtemplate}" && find . | cpio -p -v "${ezjail_rootdir}" > /dev/null
     fi
@@ -1003,8 +1032,8 @@ setup|update)
     # If ran from cron be kind to freebsds update servers and sleep first
     [ -z "$TERM" -o "$TERM" = "dumb" ] && ezjail_urgency="cron" || ezjail_urgency="fetch"
     if [ "${ezjail_use_zfs}" = "YES" ]; then
-        zfs snapshot ${ezjail_jailzfs}/basejail@`date +"%C%y%m%d_%H:%M:%S"`
-        zfs snapshot ${ezjail_jailzfs}/newjail@`date +"%C%y%m%d_%H:%M:%S"`
+        /sbin/zfs snapshot ${ezjail_jailzfs}/basejail@`date +"%C%y%m%d_%H:%M:%S"`
+        /sbin/zfs snapshot ${ezjail_jailzfs}/newjail@`date +"%C%y%m%d_%H:%M:%S"`
     fi
     env PAGER=/bin/cat freebsd-update -b ${ezjail_jailbase} ${ezjail_urgency} install
     env PAGER=/bin/cat freebsd-update -b ${ezjail_jailtemplate} ${ezjail_urgency} install
@@ -1052,7 +1081,11 @@ setup|update)
     # make and setup our world, then split basejail and newjail
     cd "${ezjail_sourcetree}" && env DESTDIR="${ezjail_jailfull}" make ${ezjail_installaction} || exerr "Error: The command 'make ${ezjail_installaction}' failed.\n  Refer to the error report(s) above."
     cd "${ezjail_sourcetree}/etc" && env DESTDIR="${ezjail_jailfull}" make distribution || exerr "Error: The command 'make distribution' failed.\n  Refer to the error report(s) above."
-    ezjail_splitworld
+# XXX we aren't doing splits now
+# XXX make this a configurable option
+#    ezjail_splitworld
+
+     ezjail_cp_full_to_newjail
 
   fi # installaction="none"
 
@@ -1065,7 +1098,7 @@ install)
   # Clean variables, prevent pollution
   unset ezjail_release ezjail_installmanpages ezjail_installports ezjail_installsources ezjail_dir ezjail_ftpserverqueried ezjail_proto ezjail_disturi
 
-  shift; while getopts :mMpPsSh:r: arg; do case ${arg} in
+  shift; while getopts :mMpPsSh:r:d: arg; do case ${arg} in
     m) ezjail_installmanpages=" manpages";;
     M) ezjail_installmanpages=" manpages"; unset ezjail_basesystem;;
     s) ezjail_installsources=" src";;
@@ -1073,6 +1106,7 @@ install)
     p) ezjail_installports="YES";;
     P) ezjail_installports="YES"; unset ezjail_basesystem;;
     h) ezjail_ftphost=${OPTARG};;
+    d) ezjail_non_basejail=${OPTARG};;
     r) ezjail_release=${OPTARG};;
     ?) exerr ${ezjail_usage_install};;
   esac; done; shift $(( ${OPTIND} - 1 ))
@@ -1201,7 +1235,11 @@ install)
   # Update to current patch level, split basejail and newjail
   if [ "${ezjail_basesystem}" ]; then
     env PAGER=/bin/cat freebsd-update -b "${DESTDIR}" fetch install
-    ezjail_splitworld
+# XXX we do not split when doing non-basejails
+# XXX somehow, make this a configurable option
+#    ezjail_splitworld
+     ezjail_cp_full_to_newjail
+
   fi
 
   # Fill ports, if requested
